@@ -1,8 +1,9 @@
-#! /usr/bin/env python
+#!/usr/bin/env python3
 
 import tensorflow as tf
 import numpy as np
 import os
+import glob
 import time
 import datetime
 import data_helpers
@@ -16,6 +17,8 @@ from tensorflow.contrib import learn
 tf.flags.DEFINE_float("dev_sample_percentage", .1, "Percentage of the training data to use for validation")
 tf.flags.DEFINE_string("positive_data_file", "./data/rt-polaritydata/rt-polarity.pos", "Data source for the positive data.")
 tf.flags.DEFINE_string("negative_data_file", "./data/rt-polaritydata/rt-polarity.neg", "Data source for the negative data.")
+tf.flags.DEFINE_string("train_data", None, "Data source for the training data (GOLD format: 'id\tlabel\tsequence')")
+tf.flags.DEFINE_string("dev_data", None, "Data source for the development data (GOLD format: 'id\tlabel\tsequence')")
 
 # Model Hyperparameters
 tf.flags.DEFINE_integer("embedding_dim", 128, "Dimensionality of character embedding (default: 128)")
@@ -41,32 +44,51 @@ FLAGS = tf.flags.FLAGS
 #     print("{}={}".format(attr.upper(), value))
 # print("")
 
+def expand_files(file_pattern):
+    """Expands multiple comma-separated file names incl. glob patterns."""
+    data_files = []
+    for pat in file_pattern.split(','):
+        data_files.extend(glob.glob(pat))
+    return data_files
+
 def preprocess():
     # Data Preparation
     # ==================================================
 
     # Load data
     print("Loading data...")
-    x_text, y = data_helpers.load_data_and_labels(FLAGS.positive_data_file, FLAGS.negative_data_file)
+    if FLAGS.train_data:
+        data_files = expand_files(FLAGS.train_data)
+        x_text, y = data_helpers.load_data_and_labels_raw(data_files)
+    else:
+        x_text, y = data_helpers.load_data_and_labels(FLAGS.positive_data_file, FLAGS.negative_data_file)
 
     # Build vocabulary
     max_document_length = max([len(x.split(" ")) for x in x_text])
     vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length)
     x = np.array(list(vocab_processor.fit_transform(x_text)))
 
-    # Randomly shuffle data
-    np.random.seed(10)
-    shuffle_indices = np.random.permutation(np.arange(len(y)))
-    x_shuffled = x[shuffle_indices]
-    y_shuffled = y[shuffle_indices]
+    if FLAGS.dev_data:
+        x_train = x
+        y_train = y
+        data_files = expand_files(FLAGS.dev_data)
+        x_dev, y_dev = data_helpers.load_data_and_labels_raw(data_files)
+        x_dev = np.array(list(vocab_processor.fit_transform(x_dev)))
+    else:
+        # Randomly shuffle data
+        np.random.seed(10)
+        shuffle_indices = np.random.permutation(np.arange(len(y)))
+        x_shuffled = x[shuffle_indices]
+        y_shuffled = y[shuffle_indices]
 
-    # Split train/test set
-    # TODO: This is very crude, should use cross-validation
-    dev_sample_index = -1 * int(FLAGS.dev_sample_percentage * float(len(y)))
-    x_train, x_dev = x_shuffled[:dev_sample_index], x_shuffled[dev_sample_index:]
-    y_train, y_dev = y_shuffled[:dev_sample_index], y_shuffled[dev_sample_index:]
+        # Split train/test set
+        # TODO: This is very crude, should use cross-validation
+        dev_sample_index = -1 * int(FLAGS.dev_sample_percentage * float(len(y)))
+        x_train, x_dev = x_shuffled[:dev_sample_index], x_shuffled[dev_sample_index:]
+        y_train, y_dev = y_shuffled[:dev_sample_index], y_shuffled[dev_sample_index:]
 
-    del x, y, x_shuffled, y_shuffled
+        del x_shuffled, y_shuffled
+    del x, y
 
     print("Vocabulary Size: {:d}".format(len(vocab_processor.vocabulary_)))
     print("Train/Dev split: {:d}/{:d}".format(len(y_train), len(y_dev)))
@@ -155,7 +177,7 @@ def train(x_train, y_train, vocab_processor, x_dev, y_dev):
                 print("{}: step {}, loss {:g}, acc {:g}".format(time_str, step, loss, accuracy))
                 train_summary_writer.add_summary(summaries, step)
 
-            def dev_step(x_batch, y_batch, writer=None):
+            def dev_step(x_batch, y_batch, writer=None, eval_num=0):
                 """
                 Evaluates model on a dev set
                 """
@@ -168,7 +190,7 @@ def train(x_train, y_train, vocab_processor, x_dev, y_dev):
                     [global_step, dev_summary_op, cnn.loss, cnn.accuracy],
                     feed_dict)
                 time_str = datetime.datetime.now().isoformat()
-                print("{}: step {}, loss {:g}, acc {:g}".format(time_str, step, loss, accuracy))
+                print("{}: Evaluation #{}, step {}, loss {:g}, acc {:g}".format(time_str, eval_num, step, loss, accuracy))
                 if writer:
                     writer.add_summary(summaries, step)
 
@@ -176,13 +198,14 @@ def train(x_train, y_train, vocab_processor, x_dev, y_dev):
             batches = data_helpers.batch_iter(
                 list(zip(x_train, y_train)), FLAGS.batch_size, FLAGS.num_epochs)
             # Training loop. For each batch...
+            current_eval = 1
             for batch in batches:
                 x_batch, y_batch = zip(*batch)
                 train_step(x_batch, y_batch)
                 current_step = tf.train.global_step(sess, global_step)
                 if current_step % FLAGS.evaluate_every == 0:
-                    print("\nEvaluation:")
-                    dev_step(x_dev, y_dev, writer=dev_summary_writer)
+                    dev_step(x_dev, y_dev, writer=dev_summary_writer, eval_num=current_eval)
+                    current_eval += 1
                     print("")
                 if current_step % FLAGS.checkpoint_every == 0:
                     path = saver.save(sess, checkpoint_prefix, global_step=current_step)

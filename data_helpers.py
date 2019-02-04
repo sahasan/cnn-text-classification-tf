@@ -42,6 +42,38 @@ def load_data_and_labels(positive_data_file, negative_data_file):
     y = np.concatenate([positive_labels, negative_labels], 0)
     return [x_text, y]
 
+def load_data_and_labels_raw(data_files):
+    """
+    Loads MR polarity data from raw files, splits the data into words and generates labels.
+    Returns split sentences and labels.
+    """
+    positive_examples = set() # use sets for deduplication
+    negative_examples = set()
+    # Load data from files
+    for fname in data_files:
+        print("Processing %s..." % fname)
+        for nline, line in enumerate(open(fname)):
+            sline = line.split('\t') # 254941790757601280	negative	They may have a SuperBowl in...
+            if len(sline) != 3:
+                print("Format error in line %d: %s" % (nline, line))
+                continue
+            _id, label, segment = sline
+            if label == "positive":
+                positive_examples.add(segment.strip())
+            elif label == "negative":
+                negative_examples.add(segment.strip())
+            else:
+                print("Unknown label in line %d: %s" % (nline, label))
+    print("Loaded %d positive and %d negative unique sequences" % (len(positive_examples), len(negative_examples)))
+
+    # Concatenate as lists
+    x_text = list(positive_examples) + list(negative_examples)
+
+    # Generate labels
+    positive_labels = [[0, 1] for _ in positive_examples]
+    negative_labels = [[1, 0] for _ in negative_examples]
+    y = np.concatenate([positive_labels, negative_labels], 0)
+    return [x_text, y]
 
 def batch_iter(data, batch_size, num_epochs, shuffle=True):
     """
